@@ -1,0 +1,3 @@
+A PyCUDA parallelized viterbi decoder.
+Currently very unoptimized, probably slower than performing all calculations on the host computer.
+All code is under an MIT license.

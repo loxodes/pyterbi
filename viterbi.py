@@ -16,21 +16,52 @@ import pycuda.autoinit
 import pycuda.driver as cuda
 from pycuda.compiler import SourceModule
 import numpy as np 
-from multiprocessing import Pool, Array, Process
 import sys
 
-BLOCK_SIZE = 16
+
+nobs = 1000 
+noutputs = 20 
+nstates = 30
 
 def main():
-    obs = np.array([1,1,1,0],dtype=np.int32)
-    states = np.array([0,1])
-    init_p = np.log(np.array([.9,.1],dtype=np.float32))
-    trans_p = np.log(np.array([(.5,.5),(.1,.9)],dtype=np.float32))
-    emit_p = np.log(np.array([(.8,.2),(.2,.8)], dtype=np.float32))
-    route_host = viterbi_host(obs, states, init_p, trans_p, emit_p)
-    route_cu = viterbi_cuda(obs, states, init_p, trans_p, emit_p)
-    print 'cuda route:\n', route_cu
-    print 'host route:\n', route_host
+    start = cuda.Event()
+    end = cuda.Event()
+    
+    states = np.array(range(nstates))
+    obs = np.array(np.random.randint(noutputs,size=nobs),dtype=np.int32)
+
+    init_p = np.random.rand(nstates)
+    init_p = np.log(np.array((init_p/sum(init_p)),dtype=np.float32))
+    
+    trans_p = np.random.rand(nstates,nstates)
+    trans_p = np.transpose(trans_p / sum(trans_p))
+    trans_p = np.log(np.array(trans_p, dtype=np.float32))
+
+    emit_p = np.random.rand(nstates,noutputs)
+    emit_p = np.transpose(emit_p / sum(emit_p))
+    emit_p = np.log(np.array(emit_p, dtype=np.float32))
+
+    start.record() 
+    route_host, path_host, back_host = viterbi_host(obs, states, init_p, trans_p, emit_p)
+    end.record()
+    end.synchronize()
+    host_time = start.time_till(end) * 1e-3
+   
+    start.record()
+    route_cu, path_cu, back_cu = viterbi_cuda(obs, states, init_p, trans_p, emit_p)
+    end.record()
+    end.synchronize()
+    cuda_time = start.time_till(end) * 1e-3
+
+    if (np.array_equal(route_cu, route_host)):
+        print 'host and cuda paths match'
+    else:
+        print 'host and cuda paths do *NOT* match!'
+        pdb.set_trace()
+
+    print 'cuda execution time: ', cuda_time
+    print 'host execution time: ', host_time
+    print 'speedup in cuda path: ', host_time/cuda_time
 
 def viterbi_host(obs, states, init_p, trans_p, emit_p):
     # create negative infinity probability matrix
@@ -58,7 +89,7 @@ def viterbi_host(obs, states, init_p, trans_p, emit_p):
     for n in range(2,nobs+1):
         route[-n] = back[nobs-n+1,route[nobs-n+1]]
     
-    return route
+    return route, path_p, back
 
 
 def viterbi_cuda(obs, states, init_p, trans_p, emit_p):
@@ -90,14 +121,13 @@ def viterbi_cuda(obs, states, init_p, trans_p, emit_p):
     back_gpu = cuda.mem_alloc(back.nbytes)
     cuda.memcpy_htod(back_gpu, back)
 
-    viterbi_step_func = mod.get_function("viterbi_cuda_step")
+    viterbi_cuda = mod.get_function("viterbi_cuda")
 
-    nstates_gpu  = np.int32(len(states))
+    nstates_gpu = np.int32(len(states))
     
     # calculate viterbi steps
     for n in np.arange(1, nobs, dtype=np.uint32):
-        for m in states:
-            viterbi_step_func(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, n, nstates_gpu, block=(nstates,1,1));
+        viterbi_cuda(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, n, nstates_gpu, block=(nstates,1,1));
 
     cuda.memcpy_dtoh(back, back_gpu)
     cuda.memcpy_dtoh(path_p, path_p_gpu);
@@ -108,12 +138,12 @@ def viterbi_cuda(obs, states, init_p, trans_p, emit_p):
     for n in range(2,nobs+1):
         route[-n] = back[nobs-n+1,route[nobs-n+1]]
     
-    return route
+    return route, path_p, back
 
 mod = SourceModule("""
 #include <stdio.h> 
 
-__global__ void viterbi_cuda_step(int *obs, float *trans_p, float *emit_p, float *path_p, int *back, int tick, int nstates)
+__global__ void viterbi_cuda(int *obs, float *trans_p, float *emit_p, float *path_p, int *back, int tick, int nstates)
 {
     const int tx = threadIdx.x;
     const int ty = threadIdx.y; 
@@ -124,23 +154,22 @@ __global__ void viterbi_cuda_step(int *obs, float *trans_p, float *emit_p, float
     int i, ipmax;
 
     float pmax = logf(0);
-    float pt = 0;
+    float pt = 0; 
     ipmax = 0;
 
     for(i = 0; i < nstates; i++)
     {
-        pt = emit_p[obs[tick]+tx*nstates] + trans_p[i*nstates+tx] + path_p[(tick-1)*nstates+i];
+        pt = emit_p[obs[tick]*nstates+tx] + trans_p[i*nstates+tx] + path_p[(tick-1)*nstates+i];
         if(pt > pmax) {
             ipmax = i;
             pmax = pt;
         }
     }
     
-    __syncthreads();
-    
     path_p[tick*nstates+tx] = pmax;
     back[tick*nstates+tx] = ipmax;
     
+    __syncthreads();
 }
 """)
 

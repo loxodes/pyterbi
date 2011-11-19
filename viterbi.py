@@ -19,7 +19,7 @@ import numpy as np
 import sys
 
 
-nobs = 2048 
+nobs = 1024 
 noutputs = 64 
 nstates = 64
 
@@ -124,10 +124,10 @@ def viterbi_cuda(obs, states, init_p, trans_p, emit_p):
     viterbi_cuda = mod.get_function("viterbi_cuda")
 
     nstates_gpu = np.int32(len(states))
-    
+    nobs_gpu = np.int32(len(obs))
+
     # calculate viterbi steps
-    for n in np.arange(1, nobs, dtype=np.uint32):
-        viterbi_cuda(trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, n, nstates_gpu, block=(nstates,1,1));
+    viterbi_cuda(trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, block=(nstates,1,1));
 
     cuda.memcpy_dtoh(back, back_gpu)
     cuda.memcpy_dtoh(path_p, path_p_gpu);
@@ -144,15 +144,14 @@ mod = SourceModule("""
 #include <stdio.h> 
 
 #define MAX_OBS 2048 
-#define MAX_STATES 64
+#define MAX_STATES 64 
 #define MAX_OUTS 64
 __device__ __constant__ unsigned short obs[MAX_OBS];
 
-
-__global__ void viterbi_cuda(float *trans_p, float *emit_p, float *path_p, int *back, int tick, int nstates)
+__global__ void viterbi_cuda(float *trans_p, float *emit_p, float *path_p, int *back, int nstates, int nobs)
 {
     const int tx = threadIdx.x;
-    int i, ipmax;
+    int i,j, ipmax;
     
     __shared__ float emit_p_s[MAX_OUTS * MAX_STATES];
     __shared__ float trans_p_s[MAX_STATES * MAX_STATES];
@@ -166,24 +165,26 @@ __global__ void viterbi_cuda(float *trans_p, float *emit_p, float *path_p, int *
         trans_p_s[tx + nstates * i] = trans_p[tx + nstates * i];
     }
 
-    path_p_s[tx] = path_p[(tick-1)*nstates + tx];
-    
-    __syncthreads();
+    for(j = 1; j < nobs; j++) {
+        path_p_s[tx] = path_p[(j-1)*nstates + tx];
+        __syncthreads();
+ 
+        float pmax = logf(0);
+        float pt = 0; 
+        ipmax = 0;
 
-    float pmax = logf(0);
-    float pt = 0; 
-    ipmax = 0;
-
-    for(i = 0; i < nstates; i++) {
-        pt = emit_p_s[obs[tick]*nstates+tx] + trans_p_s[i*nstates+tx] + path_p_s[i];
-        if(pt > pmax) {
-            ipmax = i;
-            pmax = pt;
+        for(i = 0; i < nstates; i++) {
+            pt = emit_p_s[obs[j]*nstates+tx] + trans_p_s[i*nstates+tx] + path_p_s[i];
+            if(pt > pmax) {
+                ipmax = i;
+                pmax = pt;
+            }
         }
-    }
     
-    path_p[tick*nstates+tx] = pmax;
-    back[tick*nstates+tx] = ipmax;
+        path_p[j*nstates+tx] = pmax;
+        back[j*nstates+tx] = ipmax;
+        __syncthreads();
+    }
 }
 """)
 

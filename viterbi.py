@@ -19,16 +19,16 @@ import numpy as np
 import sys
 
 
-nobs = 1000 
-noutputs = 20 
-nstates = 30
+nobs = 2048 
+noutputs = 64 
+nstates = 64
 
 def main():
     start = cuda.Event()
     end = cuda.Event()
     
     states = np.array(range(nstates))
-    obs = np.array(np.random.randint(noutputs,size=nobs),dtype=np.int32)
+    obs = np.array(np.random.randint(noutputs,size=nobs),dtype=np.uint16)
 
     init_p = np.random.rand(nstates)
     init_p = np.log(np.array((init_p/sum(init_p)),dtype=np.float32))
@@ -77,7 +77,7 @@ def viterbi_host(obs, states, init_p, trans_p, emit_p):
     back[0,:] = states
 
     for n in range(1, nobs):
-        for m in states: # parallelize this:
+        for m in states:
             p = emit_p[obs[n]][m] + trans_p[:,m] + path_p[n-1]
             back[n][m] = np.argmax(p)
             path_p[n][m] = np.amax(p)  
@@ -112,7 +112,7 @@ def viterbi_cuda(obs, states, init_p, trans_p, emit_p):
     trans_p_gpu = cuda.mem_alloc(trans_p.nbytes) 
     cuda.memcpy_htod(trans_p_gpu, trans_p)
     
-    obs_gpu = cuda.mem_alloc(obs.nbytes) 
+    obs_gpu = mod.get_global('obs')[0]
     cuda.memcpy_htod(obs_gpu, obs) 
 
     path_p_gpu = cuda.mem_alloc(path_p.nbytes)
@@ -127,7 +127,7 @@ def viterbi_cuda(obs, states, init_p, trans_p, emit_p):
     
     # calculate viterbi steps
     for n in np.arange(1, nobs, dtype=np.uint32):
-        viterbi_cuda(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, n, nstates_gpu, block=(nstates,1,1));
+        viterbi_cuda(trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, n, nstates_gpu, block=(nstates,1,1));
 
     cuda.memcpy_dtoh(back, back_gpu)
     cuda.memcpy_dtoh(path_p, path_p_gpu);
@@ -143,23 +143,39 @@ def viterbi_cuda(obs, states, init_p, trans_p, emit_p):
 mod = SourceModule("""
 #include <stdio.h> 
 
-__global__ void viterbi_cuda(int *obs, float *trans_p, float *emit_p, float *path_p, int *back, int tick, int nstates)
+#define MAX_OBS 2048 
+#define MAX_STATES 64
+#define MAX_OUTS 64
+__device__ __constant__ unsigned short obs[MAX_OBS];
+
+
+__global__ void viterbi_cuda(float *trans_p, float *emit_p, float *path_p, int *back, int tick, int nstates)
 {
     const int tx = threadIdx.x;
-    const int ty = threadIdx.y; 
-    
-    const int bx = blockIdx.x; 
-    const int by = blockIdx.y;
-
     int i, ipmax;
+    
+    __shared__ float emit_p_s[MAX_OUTS * MAX_STATES];
+    __shared__ float trans_p_s[MAX_STATES * MAX_STATES];
+    __shared__ float path_p_s[MAX_STATES];
+    
+    for(i = 0; i < MAX_OUTS; i++) {
+        emit_p_s[tx + i*nstates] = emit_p[tx + nstates * i];
+    }
+
+    for(i = 0; i < nstates; i++) {
+        trans_p_s[tx + nstates * i] = trans_p[tx + nstates * i];
+    }
+
+    path_p_s[tx] = path_p[(tick-1)*nstates + tx];
+    
+    __syncthreads();
 
     float pmax = logf(0);
     float pt = 0; 
     ipmax = 0;
 
-    for(i = 0; i < nstates; i++)
-    {
-        pt = emit_p[obs[tick]*nstates+tx] + trans_p[i*nstates+tx] + path_p[(tick-1)*nstates+i];
+    for(i = 0; i < nstates; i++) {
+        pt = emit_p_s[obs[tick]*nstates+tx] + trans_p_s[i*nstates+tx] + path_p_s[i];
         if(pt > pmax) {
             ipmax = i;
             pmax = pt;
@@ -168,8 +184,6 @@ __global__ void viterbi_cuda(int *obs, float *trans_p, float *emit_p, float *pat
     
     path_p[tick*nstates+tx] = pmax;
     back[tick*nstates+tx] = ipmax;
-    
-    __syncthreads();
 }
 """)
 

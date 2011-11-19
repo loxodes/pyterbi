@@ -1,3 +1,5 @@
 A PyCUDA parallelized viterbi decoder.
-Currently very unoptimized, probably slower than performing all calculations on the host computer.
+
+Pyterbi is about 70 times faster than straight python at 64 states, and about 20 times faster at 8 states.
+
 All code is under an MIT license.

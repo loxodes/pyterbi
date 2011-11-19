@@ -15,45 +15,36 @@ import pycuda.tools
 import pycuda.autoinit
 import pycuda.driver as cuda
 from pycuda.compiler import SourceModule
-import numpy as np 
+import numpy
 import sys
-
-
-nobs = 1024 
-noutputs = 64 
-nstates = 64
+import pp
 
 def main():
+    nobs = 2048 
+    noutputs = 64 
+    nstates = 64
+
+    [states, obs, init_p, trans_p, emit_p] = random_trellis(nobs, noutputs, nstates)
+
     start = cuda.Event()
     end = cuda.Event()
-    
-    states = np.array(range(nstates))
-    obs = np.array(np.random.randint(noutputs,size=nobs),dtype=np.uint16)
-
-    init_p = np.random.rand(nstates)
-    init_p = np.log(np.array((init_p/sum(init_p)),dtype=np.float32))
-    
-    trans_p = np.random.rand(nstates,nstates)
-    trans_p = np.transpose(trans_p / sum(trans_p))
-    trans_p = np.log(np.array(trans_p, dtype=np.float32))
-
-    emit_p = np.random.rand(nstates,noutputs)
-    emit_p = np.transpose(emit_p / sum(emit_p))
-    emit_p = np.log(np.array(emit_p, dtype=np.float32))
-
+   
+    # benchmark host path
     start.record() 
-    route_host, path_host, back_host = viterbi_host(obs, states, init_p, trans_p, emit_p)
+    route_host, path_host, back_host = viterbi_pp(obs, states, init_p, trans_p, emit_p)
     end.record()
     end.synchronize()
     host_time = start.time_till(end) * 1e-3
    
+    # benchmark cuda path
     start.record()
     route_cu, path_cu, back_cu = viterbi_cuda(obs, states, init_p, trans_p, emit_p)
     end.record()
     end.synchronize()
     cuda_time = start.time_till(end) * 1e-3
 
-    if (np.array_equal(route_cu, route_host)):
+    # report on results
+    if (numpy.array_equal(route_cu, route_host)):
         print 'host and cuda paths match'
     else:
         print 'host and cuda paths do *NOT* match!'
@@ -63,14 +54,31 @@ def main():
     print 'host execution time: ', host_time
     print 'speedup in cuda path: ', host_time/cuda_time
 
+def random_trellis(nobs, noutputs, nstates):
+    states = numpy.array(range(nstates))
+    obs = numpy.array(numpy.random.randint(noutputs,size=nobs),dtype=numpy.uint16)
+
+    init_p = numpy.random.rand(nstates)
+    init_p = numpy.log(numpy.array((init_p/sum(init_p)),dtype=numpy.float32))
+    
+    trans_p = numpy.random.rand(nstates,nstates)
+    trans_p = numpy.transpose(trans_p / sum(trans_p))
+    trans_p = numpy.log(numpy.array(trans_p, dtype=numpy.float32))
+
+    emit_p = numpy.random.rand(nstates,noutputs)
+    emit_p = numpy.transpose(emit_p / sum(emit_p))
+    emit_p = numpy.log(numpy.array(emit_p, dtype=numpy.float32))
+
+    return [states, obs, init_p, trans_p, emit_p]
+
 def viterbi_host(obs, states, init_p, trans_p, emit_p):
     # create negative infinity probability matrix
     nobs = len(obs)
     nstates = len(states)
     
     # track path through trellis
-    path_p = np.zeros((nobs,nstates), dtype=np.float32)
-    back = np.zeros((nobs,nstates), dtype=np.int32)
+    path_p = numpy.zeros((nobs,nstates), dtype=numpy.float32)
+    back = numpy.zeros((nobs,nstates), dtype=numpy.int32)
 
     # set inital probabilities and path
     path_p[0,:] = init_p + emit_p[obs[0]]
@@ -79,18 +87,20 @@ def viterbi_host(obs, states, init_p, trans_p, emit_p):
     for n in range(1, nobs):
         for m in states:
             p = emit_p[obs[n]][m] + trans_p[:,m] + path_p[n-1]
-            back[n][m] = np.argmax(p)
-            path_p[n][m] = np.amax(p)  
+            back[n][m] = numpy.argmax(p)
+            path_p[n][m] = numpy.amax(p)  
 
-    route = np.zeros((nobs,1),dtype=np.int32)
-    route[-1] = np.argmax(path_p[-1,:])
-    
-    # backtrace to find likely route
-    for n in range(2,nobs+1):
-        route[-n] = back[nobs-n+1,route[nobs-n+1]]
+    route = viterbi_backtrace(nobs, path_p, back)
     
     return route, path_p, back
 
+def viterbi_pp(obs, states, init_p, trans_p, emit_p):
+    job_server = pp.Server()
+
+    j1 = job_server.submit(viterbi_host, (obs, states, init_p, trans_p, emit_p,),(viterbi_backtrace,),("numpy",))
+
+    return j1()
+    
 
 def viterbi_cuda(obs, states, init_p, trans_p, emit_p):
     # create negative infinity probability matrix
@@ -98,13 +108,13 @@ def viterbi_cuda(obs, states, init_p, trans_p, emit_p):
     nstates = len(states)
     
     # track path through trellis
-    path_p = np.zeros((nobs,nstates), dtype=np.float32)
-    back = np.zeros((nobs,nstates), dtype=np.int32)
+    path_p = numpy.zeros((nobs,nstates), dtype=numpy.float32)
+    back = numpy.zeros((nobs,nstates), dtype=numpy.int32)
 
     # set inital probabilities and path
     path_p[0,:] = init_p + emit_p[obs[0]]
     back[0,:] = states
-
+ 
     # copy constant arrays to device memory (emit_p, trans_p, obs)
     emit_p_gpu = cuda.mem_alloc(emit_p.nbytes) 
     cuda.memcpy_htod(emit_p_gpu, emit_p)
@@ -121,24 +131,29 @@ def viterbi_cuda(obs, states, init_p, trans_p, emit_p):
     back_gpu = cuda.mem_alloc(back.nbytes)
     cuda.memcpy_htod(back_gpu, back)
 
-    viterbi_cuda = mod.get_function("viterbi_cuda")
+    nstates_gpu = numpy.int32(len(states))
+    nobs_gpu = numpy.int32(len(obs))
 
-    nstates_gpu = np.int32(len(states))
-    nobs_gpu = np.int32(len(obs))
+    viterbi_cuda = mod.get_function("viterbi_cuda")
 
     # calculate viterbi steps
     viterbi_cuda(trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, block=(nstates,1,1));
 
     cuda.memcpy_dtoh(back, back_gpu)
-    cuda.memcpy_dtoh(path_p, path_p_gpu);
-    route = np.zeros((nobs,1),dtype=np.int32)
-    route[-1] = np.argmax(path_p[-1,:])
-  
+    cuda.memcpy_dtoh(path_p, path_p_gpu)
+    
+    route = viterbi_backtrace(nobs, path_p, back)
+    
+    return route, path_p, back
+
+def viterbi_backtrace(nobs, path_p, back):
+    route = numpy.zeros((nobs,1),dtype=numpy.int32)
+    route[-1] = numpy.argmax(path_p[-1,:])
+
     # backtrace to find likely route
     for n in range(2,nobs+1):
         route[-n] = back[nobs-n+1,route[nobs-n+1]]
-    
-    return route, path_p, back
+    return route;
 
 mod = SourceModule("""
 #include <stdio.h> 
@@ -151,7 +166,7 @@ __device__ __constant__ unsigned short obs[MAX_OBS];
 __global__ void viterbi_cuda(float *trans_p, float *emit_p, float *path_p, int *back, int nstates, int nobs)
 {
     const int tx = threadIdx.x;
-    int i,j, ipmax;
+    int i, j, ipmax;
     
     __shared__ float emit_p_s[MAX_OUTS * MAX_STATES];
     __shared__ float trans_p_s[MAX_STATES * MAX_STATES];

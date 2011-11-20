@@ -3,7 +3,7 @@
 # mit license
 
 # viterbi algorithim, in pycuda and python
-# course project for parallel computing class
+
 # obs       - observations                      [sample]
 # states    - states                            [state] 
 # init_p    - initial log probabilities         [state]
@@ -18,12 +18,26 @@ from pycuda.compiler import SourceModule
 import numpy
 import sys
 import pp
+import matplotlib.pyplot as plt
 
 def main():
-    nobs = 2048 
-    noutputs = 64 
-    nstates = 64
+    nobs = [pow(2,i) for i in range(4,12)];
+    noutputs = 32;
+    nstates = [pow(2,i) for i in range(1,7)]
+    speedup = [[speedup_calc(o, noutputs, n) for n in nstates] for o in nobs]
+    f = plt.figure()
 
+    plots = [plt.plot(nstates, s) for s in speedup]
+    plt.legend(plots, nobs,title='observations',bbox_to_anchor=(1.10,1))
+
+    plt.xlabel('number of states')
+    plt.ylabel('speedup over host only implementation')
+    plt.title('speedup of pycuda pyterbi over host only viterbi decoder\n32 outputs, variable number of states and observations lengths\nCPU: i2520m, GPU: NVS4200M')
+    plt.grid(True)
+    plt.savefig('speedup_graph.png')
+    plt.show()
+
+def speedup_calc(nobs, noutputs, nstates):
     [states, obs, init_p, trans_p, emit_p] = random_trellis(nobs, noutputs, nstates)
 
     start = cuda.Event()
@@ -31,7 +45,7 @@ def main():
    
     # benchmark host path
     start.record() 
-    route_host, path_host, back_host = viterbi_pp(obs, states, init_p, trans_p, emit_p)
+    route_host, path_host, back_host = viterbi_host(obs, states, init_p, trans_p, emit_p)
     end.record()
     end.synchronize()
     host_time = start.time_till(end) * 1e-3
@@ -45,14 +59,12 @@ def main():
 
     # report on results
     if (numpy.array_equal(route_cu, route_host)):
-        print 'host and cuda paths match'
+        pass
     else:
         print 'host and cuda paths do *NOT* match!'
         pdb.set_trace()
 
-    print 'cuda execution time: ', cuda_time
-    print 'host execution time: ', host_time
-    print 'speedup in cuda path: ', host_time/cuda_time
+    return (host_time/cuda_time)
 
 def random_trellis(nobs, noutputs, nstates):
     states = numpy.array(range(nstates))
@@ -72,11 +84,8 @@ def random_trellis(nobs, noutputs, nstates):
     return [states, obs, init_p, trans_p, emit_p]
 
 def viterbi_host(obs, states, init_p, trans_p, emit_p):
-    # create negative infinity probability matrix
     nobs = len(obs)
     nstates = len(states)
-    
-    # track path through trellis
     path_p = numpy.zeros((nobs,nstates), dtype=numpy.float32)
     back = numpy.zeros((nobs,nstates), dtype=numpy.int32)
 
@@ -103,19 +112,16 @@ def viterbi_pp(obs, states, init_p, trans_p, emit_p):
     
 
 def viterbi_cuda(obs, states, init_p, trans_p, emit_p):
-    # create negative infinity probability matrix
     nobs = len(obs)
     nstates = len(states)
-    
-    # track path through trellis
     path_p = numpy.zeros((nobs,nstates), dtype=numpy.float32)
     back = numpy.zeros((nobs,nstates), dtype=numpy.int32)
 
     # set inital probabilities and path
     path_p[0,:] = init_p + emit_p[obs[0]]
     back[0,:] = states
- 
-    # copy constant arrays to device memory (emit_p, trans_p, obs)
+
+    # allocate and copy arrays to global or constant memory
     emit_p_gpu = cuda.mem_alloc(emit_p.nbytes) 
     cuda.memcpy_htod(emit_p_gpu, emit_p)
 
@@ -131,12 +137,11 @@ def viterbi_cuda(obs, states, init_p, trans_p, emit_p):
     back_gpu = cuda.mem_alloc(back.nbytes)
     cuda.memcpy_htod(back_gpu, back)
 
-    nstates_gpu = numpy.int32(len(states))
-    nobs_gpu = numpy.int32(len(obs))
+    nstates_gpu = numpy.int32(nstates)
+    nobs_gpu = numpy.int32(nobs)
 
     viterbi_cuda = mod.get_function("viterbi_cuda")
 
-    # calculate viterbi steps
     viterbi_cuda(trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, block=(nstates,1,1));
 
     cuda.memcpy_dtoh(back, back_gpu)
@@ -150,7 +155,6 @@ def viterbi_backtrace(nobs, path_p, back):
     route = numpy.zeros((nobs,1),dtype=numpy.int32)
     route[-1] = numpy.argmax(path_p[-1,:])
 
-    # backtrace to find likely route
     for n in range(2,nobs+1):
         route[-n] = back[nobs-n+1,route[nobs-n+1]]
     return route;
@@ -158,7 +162,7 @@ def viterbi_backtrace(nobs, path_p, back):
 mod = SourceModule("""
 #include <stdio.h> 
 
-#define MAX_OBS 2048 
+#define MAX_OBS 4096 
 #define MAX_STATES 64 
 #define MAX_OUTS 64
 __device__ __constant__ unsigned short obs[MAX_OBS];

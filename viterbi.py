@@ -21,10 +21,22 @@ import pp
 import matplotlib.pyplot as plt
 
 def main():
+    trellises = 20 
+    cores = range(1,4)
+    times = [speedup_calc(16,16,512,trellises,c) for c in cores]
+    print 'execution time', times
+
+    
+def benchmark_multitrellis():
+    pass
+
+def benchmark_singletrellis():
+    trellises = 4;
+    cores = 2;
     nobs = [pow(2,i) for i in range(4,12)];
     noutputs = 32;
     nstates = [pow(2,i) for i in range(1,7)]
-    speedup = [[speedup_calc(o, noutputs, n) for n in nstates] for o in nobs]
+    speedup = [[speedup_calc(o, noutputs, n, trellises, cores) for n in nstates] for o in nobs]
     f = plt.figure()
 
     plots = [plt.plot(nstates, s) for s in speedup]
@@ -32,27 +44,42 @@ def main():
 
     plt.xlabel('number of states')
     plt.ylabel('speedup over host only implementation')
-    plt.title('speedup of pycuda pyterbi over host only viterbi decoder\n32 outputs, variable number of states and observations lengths\nCPU: i2520m, GPU: NVS4200M')
+    plt.title('speedup of PyCUDA pyterbi over host only viterbi decoder\n32 outputs, variable number of states and observations lengths\nCPU: i5-2520M, GPU: NVS4200M')
     plt.grid(True)
     plt.savefig('speedup_graph.png')
     plt.show()
 
-def speedup_calc(nobs, noutputs, nstates):
-    [states, obs, init_p, trans_p, emit_p] = random_trellis(nobs, noutputs, nstates)
-
+def speedup_calc(nobs, noutputs, nstates, ntrellises, hostcores):
+    trellises = []
+    for i in range(ntrellises):
+        trellises.append(Trellis(nobs, noutputs, nstates))
+    
     start = cuda.Event()
     end = cuda.Event()
    
-    # benchmark host path
+    # benchmark host path with an arbitrary number of host cores
     start.record() 
-    route_host, path_host, back_host = viterbi_host(obs, states, init_p, trans_p, emit_p)
+    job_server = pp.Server(ncpus=hostcores)
+   
+    jobs = []
+    for t in trellises:
+        jobs.append(viterbi_ppjob(job_server, t))
+   
+    job_server.wait() 
+    for i in range(len(trellises)):
+        j = jobs[i];
+        t = trellises[i];
+        t.hostroute = j()
+    
+    
     end.record()
     end.synchronize()
     host_time = start.time_till(end) * 1e-3
-   
+    
+    ''' 
     # benchmark cuda path
     start.record()
-    route_cu, path_cu, back_cu = viterbi_cuda(obs, states, init_p, trans_p, emit_p)
+    route_cu = viterbi_cuda(obs, states, init_p, trans_p, emit_p, trellises)
     end.record()
     end.synchronize()
     cuda_time = start.time_till(end) * 1e-3
@@ -65,23 +92,28 @@ def speedup_calc(nobs, noutputs, nstates):
         pdb.set_trace()
 
     return (host_time/cuda_time)
+'''
+    return host_time
 
-def random_trellis(nobs, noutputs, nstates):
-    states = numpy.array(range(nstates))
-    obs = numpy.array(numpy.random.randint(noutputs,size=nobs),dtype=numpy.uint16)
-
-    init_p = numpy.random.rand(nstates)
-    init_p = numpy.log(numpy.array((init_p/sum(init_p)),dtype=numpy.float32))
+class Trellis:
+    def __init__(self, nobs, noutputs, nstates):
+        self.states = numpy.array(range(nstates))
+        self.obs = numpy.array(numpy.random.randint(noutputs,size=nobs),dtype=numpy.uint16)
+        
+        self.init_p = numpy.random.rand(nstates)
+        self.init_p = numpy.log(numpy.array((self.init_p/sum(self.init_p)),dtype=numpy.float32))
+        
+        self.trans_p = numpy.random.rand(nstates,nstates)
+        self.trans_p = numpy.transpose(self.trans_p / sum(self.trans_p))
+        self.trans_p = numpy.log(numpy.array(self.trans_p, dtype=numpy.float32))
     
-    trans_p = numpy.random.rand(nstates,nstates)
-    trans_p = numpy.transpose(trans_p / sum(trans_p))
-    trans_p = numpy.log(numpy.array(trans_p, dtype=numpy.float32))
-
-    emit_p = numpy.random.rand(nstates,noutputs)
-    emit_p = numpy.transpose(emit_p / sum(emit_p))
-    emit_p = numpy.log(numpy.array(emit_p, dtype=numpy.float32))
-
-    return [states, obs, init_p, trans_p, emit_p]
+        self.emit_p = numpy.random.rand(nstates,noutputs)
+        self.emit_p = numpy.transpose(self.emit_p / sum(self.emit_p))
+        self.emit_p = numpy.log(numpy.array(self.emit_p, dtype=numpy.float32))
+        
+        self.cudaroute = []
+        self.hostroute = []
+        self.refroute = []
 
 def viterbi_host(obs, states, init_p, trans_p, emit_p):
     nobs = len(obs)
@@ -103,19 +135,18 @@ def viterbi_host(obs, states, init_p, trans_p, emit_p):
     
     return route, path_p, back
 
-def viterbi_pp(obs, states, init_p, trans_p, emit_p):
-    job_server = pp.Server()
+def viterbi_ppjob(server, tr):
+    return server.submit(viterbi_host, (tr.obs, tr.states, tr.init_p, tr.trans_p, tr.emit_p,),(viterbi_backtrace,),("numpy",))
 
-    j1 = job_server.submit(viterbi_host, (obs, states, init_p, trans_p, emit_p,),(viterbi_backtrace,),("numpy",))
-
-    return j1()
     
 
-def viterbi_cuda(obs, states, init_p, trans_p, emit_p):
+def viterbi_cuda(obs, states, init_p, trans_p, emit_p, trellises):
+    
+
     nobs = len(obs)
     nstates = len(states)
-    path_p = numpy.zeros((nobs,nstates), dtype=numpy.float32)
-    back = numpy.zeros((nobs,nstates), dtype=numpy.int32)
+    path_p = numpy.zeros((nobs,nstates,trellises), dtype=numpy.float32)
+    back = numpy.zeros((nobs,nstates,trellises), dtype=numpy.int32)
 
     # set inital probabilities and path
     path_p[0,:] = init_p + emit_p[obs[0]]
@@ -165,6 +196,7 @@ mod = SourceModule("""
 #define MAX_OBS 4096 
 #define MAX_STATES 64 
 #define MAX_OUTS 64
+
 __device__ __constant__ unsigned short obs[MAX_OBS];
 
 __global__ void viterbi_cuda(float *trans_p, float *emit_p, float *path_p, int *back, int nstates, int nobs)

@@ -21,9 +21,9 @@ import pp
 import matplotlib.pyplot as plt
 
 def main():
-    trellises = 16
+    trellises = 4
     cores = 2
-    times = speedup_calc(1024,32,32,trellises,cores)
+    times = speedup_calc(16,16,16,trellises,cores)
     print 'it worked! speedup due to parallelism:', times
 
     
@@ -154,7 +154,7 @@ def viterbi_cuda(trellises):
     viterbi_cuda_gpu = mod.get_function("viterbi_cuda")
    
     # all trellises must be the same length/width
-    noutputs = len(trellises[0].emit_p[:,0])
+    noutputs = len(trellises[0].emit_p[0,:])
     nstates = len(trellises[0].states)
     nobs = len(trellises[0].obs)
     ntrellises = len(trellises)
@@ -165,7 +165,7 @@ def viterbi_cuda(trellises):
     
     path_p = numpy.zeros((nobs,nstates,ntrellises), dtype=numpy.float32)
     back = numpy.zeros((nobs,nstates,ntrellises), dtype=numpy.int16)
-    emit_p = numpy.zeros((noutputs,nstates,ntrellises), dtype=numpy.float32)
+    emit_p = numpy.zeros((nstates,noutputs,ntrellises), dtype=numpy.float32)
     trans_p = numpy.zeros((nstates,nstates,ntrellises), dtype=numpy.float32)
     obs = numpy.zeros((nobs,ntrellises), dtype=numpy.int16)
 
@@ -209,9 +209,9 @@ def viterbi_backtrace(nobs, path_p, back):
 mod = SourceModule("""
 #include <stdio.h> 
 
-#define MAX_OBS 1024 
-#define MAX_STATES 32
-#define MAX_OUTS 32
+#define MAX_OBS 128 
+#define MAX_STATES 16 
+#define MAX_OUTS 16
 
 __global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *path_p, short *back, short nstates, short nobs)
 {

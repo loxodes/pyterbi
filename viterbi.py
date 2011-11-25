@@ -22,11 +22,11 @@ import pp
 import matplotlib.pyplot as plt
 
 def main():
-    trellises = 5 
-    cores = 2
-    times = speedup_calc(512,48,48,trellises,cores)
+    trellises = 10 
+    cores = 3
+    times = speedup_calc(384,16,80,trellises,cores)
     print 'speedup due to parallelism:', times
-
+    print 'Concurrent Kernels:', bool(cuda.get_attribute(drv.device_attribute.CONCURRENT_KERNELS))
     
 def benchmark_multitrellis():
     pass
@@ -126,6 +126,8 @@ class Trellis:
         self.routes = []
 
     def checkroutes(self):
+        if(len(self.routes) != 3):
+            print 'trellis warning, one of the runs may have failed!'
         for i in range(1,len(self.routes)):
             if(not numpy.array_equal(self.routes[i],self.routes[0])):
                 return False
@@ -231,9 +233,9 @@ def viterbi_backtrace(nobs, path_p, back):
 mod = SourceModule("""
 #include <stdio.h> 
 
-#define MAX_OBS 512 
-#define MAX_STATES 48 
-#define MAX_OUTS 48
+#define MAX_OBS 384 
+#define MAX_STATES 90 
+#define MAX_OUTS 16 
 
 __global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *path_p, short *back, short nstates, short nobs, short nouts)
 {
@@ -245,6 +247,7 @@ __global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *p
     __shared__ float trans_p_s[MAX_STATES * MAX_STATES];
     __shared__ float path_p_s[MAX_STATES];
     __shared__ float path_p_s_n[MAX_STATES];
+    //__shared__ float back_s[MAX_STATES * MAX_OBS];
 
     for(i = 0; i < nouts; i++) {
         emit_p_s[tx + i*nstates] = emit_p[tx + i*nstates + bx * nouts * nstates];
@@ -276,7 +279,10 @@ __global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *p
         back[j*nstates+tx+bx*nstates*nobs] = ipmax;
         __syncthreads();
     }
-    
+    /* 
+    for(j=0; j<nobs; j++) {
+        back[j*nstates+tx+bx*nstates*nobs] = back_s[j*nstates+tx];
+    }*/
     path_p[tx + bx*nstates] = path_p_s_n[tx];
     
 }

@@ -22,10 +22,10 @@ import pp
 import matplotlib.pyplot as plt
 
 def main():
-    trellises = 4 
+    trellises = 2 
     cores = 2
-    times = speedup_calc(16,4,4,trellises,cores)
-    print 'it worked! speedup due to parallelism:', times
+    times = speedup_calc(6,3,3,trellises,cores)
+    print 'speedup due to parallelism:', times
 
     
 def benchmark_multitrellis():
@@ -80,12 +80,15 @@ def speedup_calc(nobs, noutputs, nstates, ntrellises, hostcores):
     end.synchronize()
     cuda_time = start.time_till(end) * 1e-3
     
+    
     # report on results
     for t in trellises:
         if(t.checkroutes()):
             pass
         else:
             print 'host and cuda paths do *NOT* match!'
+            t = trellises[0]
+            pdb.set_trace()
 
     return [ref_time/host_time, ref_time/cuda_time]
 
@@ -162,7 +165,6 @@ def viterbi_cuda(trellises):
 
     nstates_gpu = numpy.int16(nstates)
     nobs_gpu = numpy.int16(nobs)
-        
     
     path_p = numpy.zeros((nstates,ntrellises), dtype=numpy.float32)
     back = numpy.zeros((nobs,nstates,ntrellises), dtype=numpy.int16)
@@ -175,7 +177,7 @@ def viterbi_cuda(trellises):
         emit_p[:,:,i] = trellises[i].emit_p
         trans_p[:,:,i] = trellises[i].trans_p
         obs[:,i] = trellises[i].obs
-        path_p[:,i] = trellises[i].init_p + trellises[i].emit_p[trellises[i].obs[0],i]
+        path_p[:,i] = trellises[i].init_p + trellises[i].emit_p[trellises[i].obs[0]]
 
     # allocate and copy arrays to device global memory
     emit_p_gpu = cuda.mem_alloc(emit_p.nbytes) 
@@ -195,7 +197,6 @@ def viterbi_cuda(trellises):
     
     viterbi_cuda_gpu(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, block=(nstates,1,1),grid=(ntrellises,1))
 
-    
     cuda.memcpy_dtoh(path_p, path_p_gpu)
     cuda.memcpy_dtoh(back, back_gpu)
     
@@ -231,25 +232,24 @@ mod = SourceModule("""
 
 __global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *path_p, short *back, short nstates, short nobs)
 {
-    
+    const int bx = blockIdx.x; 
     const int tx = threadIdx.x;
     short i, j, ipmax;
-     
+    
     __shared__ float emit_p_s[MAX_OUTS * MAX_STATES];
     __shared__ float trans_p_s[MAX_STATES * MAX_STATES];
     __shared__ float path_p_s[MAX_STATES];
     __shared__ float path_p_s_n[MAX_STATES];
 
     for(i = 0; i < MAX_OUTS; i++) {
-        emit_p_s[tx + i*nstates] = emit_p[tx + i*nstates];
+        emit_p_s[tx + i*nstates] = emit_p[tx + i*nstates + bx * MAX_OUTS * MAX_STATES];
     }
 
-   
     for(i = 0; i < nstates; i++) {
-        trans_p_s[tx + nstates * i] = trans_p[tx + nstates * i];
+        trans_p_s[tx + nstates * i] = trans_p[tx + nstates * i + bx * MAX_STATES * MAX_STATES];
     }
     
-    path_p_s_n[tx] = path_p[tx];
+    path_p_s_n[tx] = path_p[tx + bx*nstates];
 
     // I only need to maintain a slice of path_p and it could remain in shared memory, this would reduce memory accesses by quite a bit
     for(j = 1; j < nobs; j++) {
@@ -261,7 +261,7 @@ __global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *p
         ipmax = 0;
 
         for(i = 0; i < nstates; i++) {
-            pt = emit_p_s[obs[j]*nstates+tx] + trans_p_s[i*nstates+tx] + path_p_s[i];
+            pt = emit_p_s[obs[nobs*bx+j]*nstates+tx] + trans_p_s[i*nstates+tx] + path_p_s[i];
             if(pt > pmax) {
                 ipmax = i;
                 pmax = pt;
@@ -269,9 +269,11 @@ __global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *p
         }
     
         path_p_s_n[tx] = pmax;
-        back[j*nstates+tx] = ipmax;
+        back[j*nstates+tx+bx*nstates*nobs] = ipmax;
         __syncthreads();
     }
+    
+    path_p[tx + bx*nstates] = path_p_s_n[tx];
     
 }
 """)

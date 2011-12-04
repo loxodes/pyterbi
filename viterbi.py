@@ -22,64 +22,69 @@ import pp
 import matplotlib.pyplot as plt
 
 def main():
-    trellises = 10 
-    cores = 3
-    times = speedup_calc(384,16,80,trellises,cores)
+    trellises = 100
+    cores = 1
+    times = speedup_calc(64,16,16,trellises,cores, True)
     print 'speedup due to parallelism:', times
-    print 'Concurrent Kernels:', bool(cuda.get_attribute(drv.device_attribute.CONCURRENT_KERNELS))
     
-def benchmark_multitrellis():
-    pass
-
-def benchmark_singletrellis():
-    trellises = 4;
-    cores = 2;
-    nobs = [pow(2,i) for i in range(4,12)];
-    noutputs = 32;
+def benchmark_graphgen():
+    trellises = range(1,9)
+    maxcores = 4
+    nobs = [pow(2,i) for i in range(4,11)]
+    noutputs = 32
     nstates = [pow(2,i) for i in range(1,7)]
-    speedup = [[speedup_calc(o, noutputs, n, trellises, cores) for n in nstates] for o in nobs]
-    f = plt.figure()
+    speedup = [[speedup_calc(o, noutputs, n, trellises, c) for n in nstates] for o in nobs]
 
+    # generate CUDA speedup graph
     plots = [plt.plot(nstates, s) for s in speedup]
+    
     plt.legend(plots, nobs,title='observations',bbox_to_anchor=(1.10,1))
     plt.xlabel('number of states')
     plt.ylabel('speedup over host only implementation')
     plt.title('speedup of PyCUDA pyterbi over host only viterbi decoder\n32 outputs, variable number of states and observations lengths\nCPU: i5-2520M, GPU: NVS4200M')
+    
     plt.grid(True)
-    plt.savefig('speedup_graph.png')
+    plt.savefig('speedup_graph_cuda.png')
     plt.show()
 
-def speedup_calc(nobs, noutputs, nstates, ntrellises, hostcores):
-    trellises = []
+    # TODO: generate host core speedup graph
 
-    for i in range(ntrellises):
-        trellises.append(Trellis(nobs, noutputs, nstates))
-    
+
+def benchmark_host(trellises, cores, networked=False):
     start = cuda.Event()
     end = cuda.Event()
-   
-    # benchmark host path with an arbitrary number of host cores
-    start.record() 
-    run_hostviterbi(trellises, hostcores)
-    end.record()
-    end.synchronize()
-    host_time = start.time_till(end) * 1e-3
-   
-    # benchmark host path with 1 host core, reference implementation
-    start.record()
-    run_hostviterbi(trellises, 1)
-    end.record()
-    end.synchronize()
-    ref_time = start.time_till(end) * 1e-3
 
-     
-    # benchmark cuda path
+    start.record()
+    run_hostviterbi(trellises, cores, networked)
+    end.record()
+    end.synchronize()
+    
+    ref_time = start.time_till(end) * 1e-3
+    return ref_time
+
+def benchmark_cuda(trellises):
+    start = cuda.Event()
+    end = cuda.Event()
+
     start.record()
     viterbi_cuda(trellises)
     end.record()
     end.synchronize()
     cuda_time = start.time_till(end) * 1e-3
+    return cuda_time
+
+def speedup_calc(nobs, noutputs, nstates, ntrellises, maxhostcores, networked = False):
+    trellises = []
+
+    for i in range(ntrellises):
+        trellises.append(Trellis(nobs, noutputs, nstates))
     
+    ref_time = benchmark_host(trellises, 1, networked)
+    cuda_time = benchmark_cuda(trellises)
+    
+    host_times = []
+    for h in range(1,maxhostcores+1):
+        host_times.append(benchmark_host(trellises, h))
     
     # report on results
     for t in trellises:
@@ -90,22 +95,31 @@ def speedup_calc(nobs, noutputs, nstates, ntrellises, hostcores):
             t = trellises[0]
             pdb.set_trace()
 
-    return [ref_time/host_time, ref_time/cuda_time]
+    return [ref_time, cuda_time, host_times]
 
-def run_hostviterbi(trellises, hostcores):
-    job_server = pp.Server(ncpus=hostcores)
+def run_hostviterbi(trellises, hostcores, networked=False):
+    if not networked:
+        job_server = pp.Server(ncpus=hostcores)
+    else:
+        ppservers=("172.20.231.189",) # proof of concept hardcoding..
+        job_server = pp.Server(ppservers=ppservers)
+        print 'connected to:', job_server.get_active_nodes() 
     jobs = []
     
     for t in trellises:
         jobs.append(t.get_ppjob(job_server))
     
     job_server.wait()
-    
+
     for i in range(len(trellises)):
         j = jobs[i];
         t = trellises[i];
         t.routes.append(j())
 
+    if networked:
+        job_server.print_stats()
+    
+    
 # I'm trying to pretend this is a struct...
 class Trellis:
     def __init__(self, nobs, noutputs, nstates):
@@ -201,8 +215,15 @@ def viterbi_cuda(trellises):
     cuda.memcpy_htod(path_p_gpu, path_p)
     
     back_gpu = cuda.mem_alloc(back.nbytes)
-   
-    viterbi_cuda_gpu(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, nouts_gpu, block=(nstates,1,1),grid=(ntrellises,1))
+    
+    streams = []
+    
+    for i in range(len(trellises)):
+        s = cuda.Stream()
+        viterbi_cuda_gpu(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, nouts_gpu, numpy.int16(i), block=(nstates,1,1), stream=s)
+        streams.append(s)
+
+#    viterbi_cuda_gpu(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, nouts_gpu, block=(nstates,1,1),grid=(ntrellises,1))
     
     cuda.memcpy_dtoh(path_p, path_p_gpu)
     cuda.memcpy_dtoh(back, back_gpu)
@@ -233,13 +254,12 @@ def viterbi_backtrace(nobs, path_p, back):
 mod = SourceModule("""
 #include <stdio.h> 
 
-#define MAX_OBS 384 
-#define MAX_STATES 90 
-#define MAX_OUTS 16 
+#define MAX_OBS 1024 
+#define MAX_STATES 64 
+#define MAX_OUTS 64
 
-__global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *path_p, short *back, short nstates, short nobs, short nouts)
+__global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *path_p, short *back, short nstates, short nobs, short nouts, short bx)
 {
-    const int bx = blockIdx.x; 
     const int tx = threadIdx.x;
     short i, j, ipmax;
     
@@ -277,12 +297,14 @@ __global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *p
     
         path_p_s_n[tx] = pmax;
         back[j*nstates+tx+bx*nstates*nobs] = ipmax;
+        //back_s[j*nstates+tx] = ipmax;
         __syncthreads();
     }
-    /* 
-    for(j=0; j<nobs; j++) {
-        back[j*nstates+tx+bx*nstates*nobs] = back_s[j*nstates+tx];
-    }*/
+    
+    //for(j=0; j<nobs; j++) {
+    //    back[j*nstates+tx+bx*nstates*nobs] = back_s[j*nstates+tx];
+    //}
+    
     path_p[tx + bx*nstates] = path_p_s_n[tx];
     
 }

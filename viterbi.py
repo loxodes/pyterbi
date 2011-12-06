@@ -2,7 +2,8 @@
 # kleinjt@ieee.org
 # mit license 
 
-# viterbi algorithim, in pycuda and python
+# viterbi algorithim, in pycuda and python (pp parallelized)
+# requires cuda compute capability 2.0 or higher
 
 # obs       - observations                      [sample]
 # states    - states                            [state] 
@@ -22,33 +23,42 @@ import pp
 import matplotlib.pyplot as plt
 
 def main():
-    trellises = 20
-    cores = 1
-    times = speedup_calc(64,64,64,trellises,cores)
-    print 'speedup due to parallelism:', times
-#    benchmark_graphgen()
+#    trellises = 1 
+#    cores = 0
+#    times = speedup_calc(16,4,4,trellises,cores, True)
+#    print 'speedup due to parallelism:', times
+    benchmark_graphgen()
 
 def benchmark_graphgen():
     trellises = 8 
     maxcores = 4
     nobs = [pow(2,i) for i in range(4,11)]
-    noutputs = 32
+    noutputs = 32 
     nstates = [pow(2,i) for i in range(4,7)]
-    speedup = [[speedup_calc(o, noutputs, n, trellises, maxcores) for n in nstates] for o in nobs]
-
-    # generate CUDA speedup graph
-    plots = [plt.plot(nstates, s) for s in speedup]
+    speedups = [[speedup_calc(o, noutputs, n, trellises, maxcores) for n in nstates] for o in nobs]
     
+    # sorry for the mess.. python list comprehension is too entertaining
+    cuda_speedups = [[s[0] for s in n] for n in speedups]
+    host_speedups = [[s[1] for s in n] for n in speedups]
+
+    plots = [plt.plot(nstates, s) for s in cuda_speedups]
     plt.legend(plots, nobs,title='observations',bbox_to_anchor=(1.10,1))
     plt.xlabel('number of states')
     plt.ylabel('speedup over host only implementation')
-    plt.title('speedup of PyCUDA pyterbi over host only viterbi decoder\n32 outputs, variable number of states and observations lengths\nCPU: i5-2520M, GPU: NVS4200M')
+    plt.title('speedup of PyCUDA pyterbi over host only viterbi decoder\nCPU: i5-2520M, GPU: NVS4200M')
     
     plt.grid(True)
     plt.savefig('speedup_graph_cuda.png')
-    plt.show()
-    # TODO: generate host core speedup graph
 
+    plt.clf()
+    plots = [plt.plot(nstates, s) for s in host_speedups]
+    plt.legend(plots, nobs,title='observations',bbox_to_anchor=(1.10,1))
+    plt.xlabel('number of states')
+    plt.ylabel('speedup over single process implementation')
+    plt.title('speedup of multiple process parallized pyterbi over single process viterbi decoder\nCPU: i5-2520M')
+    
+    plt.grid(True)
+    plt.savefig('speedup_graph_host.png')
 
 def benchmark_host(trellises, cores, networked=False):
     start = cuda.Event()
@@ -79,12 +89,9 @@ def speedup_calc(nobs, noutputs, nstates, ntrellises, maxhostcores, networked = 
     for i in range(ntrellises):
         trellises.append(Trellis(nobs, noutputs, nstates))
     
-    ref_time = benchmark_host(trellises, 1, networked)
+    ref_time = benchmark_host(trellises, 1, False)
     cuda_time = benchmark_cuda(trellises)
-    
-    host_times = []
-    for h in range(1,maxhostcores+1):
-        host_times.append(benchmark_host(trellises, h))
+    host_time = benchmark_host(trellises, maxhostcores, networked)
     
     # report on results
     for t in trellises:
@@ -95,14 +102,14 @@ def speedup_calc(nobs, noutputs, nstates, ntrellises, maxhostcores, networked = 
             t = trellises[0]
             pdb.set_trace()
 
-    return ref_time/ cuda_time#, host_times]
+    return [ref_time/cuda_time, ref_time/host_time]
 
 def run_hostviterbi(trellises, hostcores, networked=False):
     if not networked:
         job_server = pp.Server(ncpus=hostcores)
     else:
-        ppservers=("172.20.231.189",) # proof of concept hardcoding..
-        job_server = pp.Server(ppservers=ppservers)
+        ppservers=("208.93.153.39",) # proof of concept hardcoding..
+        job_server = pp.Server(ppservers=ppservers, secret="pyterbi", ncpus=hostcores)
         print 'connected to:', job_server.get_active_nodes() 
     jobs = []
     
@@ -142,8 +149,8 @@ class Trellis:
         self.routes = []
 
     def checkroutes(self):
-        if(len(self.routes) < 3):
-            print 'trellis warning, one of the runs may have failed!'
+        if(len(self.routes) != 3):
+            print 'trellis warning count, one of the runs may have failed!'
         for i in range(1,len(self.routes)):
             if(not numpy.array_equal(self.routes[i],self.routes[0])):
                 return False
@@ -170,6 +177,15 @@ def viterbi_host(obs, states, init_p, trans_p, emit_p):
 
     route = viterbi_backtrace(nobs, path_p, back)
     return route
+
+def viterbi_backtrace(nobs, path_p, back):
+    route = numpy.zeros(nobs,dtype=numpy.int16)
+    route[-1] = numpy.argmax(path_p[-1,:])
+
+    for n in range(2,nobs+1):
+        route[-n] = back[nobs-n+1,route[nobs-n+1]]
+    return route
+
 
 def viterbi_cuda(trellises):
     viterbi_cuda_gpu = mod.get_function("viterbi_cuda")
@@ -220,13 +236,6 @@ def viterbi_cuda(trellises):
     
     back_gpu = cuda.mem_alloc(back.nbytes)
     
-#    streams = []
-    
-#    for i in range(len(trellises)):
-#        s = cuda.Stream()
-#        viterbi_cuda_gpu(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, nouts_gpu, numpy.int16(i), block=(nstates,1,1), stream=s)
-#        streams.append(s)
-
     viterbi_cuda_gpu(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, nouts_gpu, block=(nstates,1,1),grid=(ntrellises,1))
 
     route = numpy.zeros(obs_size, dtype=numpy.int16)
@@ -241,29 +250,12 @@ def viterbi_cuda(trellises):
         t = trellises[i]
         t.routes.append(numpy.transpose(route[i*nobs:(i+1)*nobs]))
 
-# parallelize me!
-def viterbi_cudabacktrace(nobs, path_p, back, nstates):
-    route = numpy.zeros((nobs,1),dtype=numpy.int16)
-    route[-1] = numpy.argmax(path_p)
-
-    for n in range(2,nobs+1):
-        route[-n] = back[(nobs-n+1)*nstates+route[nobs-n+1]]
-    return route
-
-def viterbi_backtrace(nobs, path_p, back):
-    route = numpy.zeros(nobs,dtype=numpy.int16)
-    route[-1] = numpy.argmax(path_p[-1,:])
-
-    for n in range(2,nobs+1):
-        route[-n] = back[nobs-n+1,route[nobs-n+1]]
-    return route
-
 mod = SourceModule("""
 #include <stdio.h> 
 
-#define MAX_OBS 1024 
+#define MAX_OBS 2048 
 #define MAX_STATES 64 
-#define MAX_OUTS 64
+#define MAX_OUTS 32 
 
 __global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *path_p, short *back, short nstates, short nobs, short nouts) // short bx
 {

@@ -22,18 +22,19 @@ import pp
 import matplotlib.pyplot as plt
 
 def main():
-    trellises = 100
+    trellises = 20
     cores = 1
-    times = speedup_calc(64,16,16,trellises,cores, True)
+    times = speedup_calc(64,64,64,trellises,cores)
     print 'speedup due to parallelism:', times
-    
+#    benchmark_graphgen()
+
 def benchmark_graphgen():
-    trellises = range(1,9)
+    trellises = 8 
     maxcores = 4
     nobs = [pow(2,i) for i in range(4,11)]
     noutputs = 32
-    nstates = [pow(2,i) for i in range(1,7)]
-    speedup = [[speedup_calc(o, noutputs, n, trellises, c) for n in nstates] for o in nobs]
+    nstates = [pow(2,i) for i in range(4,7)]
+    speedup = [[speedup_calc(o, noutputs, n, trellises, maxcores) for n in nstates] for o in nobs]
 
     # generate CUDA speedup graph
     plots = [plt.plot(nstates, s) for s in speedup]
@@ -46,7 +47,6 @@ def benchmark_graphgen():
     plt.grid(True)
     plt.savefig('speedup_graph_cuda.png')
     plt.show()
-
     # TODO: generate host core speedup graph
 
 
@@ -95,7 +95,7 @@ def speedup_calc(nobs, noutputs, nstates, ntrellises, maxhostcores, networked = 
             t = trellises[0]
             pdb.set_trace()
 
-    return [ref_time, cuda_time, host_times]
+    return ref_time/ cuda_time#, host_times]
 
 def run_hostviterbi(trellises, hostcores, networked=False):
     if not networked:
@@ -119,7 +119,9 @@ def run_hostviterbi(trellises, hostcores, networked=False):
     if networked:
         job_server.print_stats()
     
-    
+    job_server.destroy()
+
+
 # I'm trying to pretend this is a struct...
 class Trellis:
     def __init__(self, nobs, noutputs, nstates):
@@ -140,7 +142,7 @@ class Trellis:
         self.routes = []
 
     def checkroutes(self):
-        if(len(self.routes) != 3):
+        if(len(self.routes) < 3):
             print 'trellis warning, one of the runs may have failed!'
         for i in range(1,len(self.routes)):
             if(not numpy.array_equal(self.routes[i],self.routes[0])):
@@ -171,6 +173,8 @@ def viterbi_host(obs, states, init_p, trans_p, emit_p):
 
 def viterbi_cuda(trellises):
     viterbi_cuda_gpu = mod.get_function("viterbi_cuda")
+    viterbi_backtrace_gpu = mod.get_function("viterbi_cudabacktrace")
+   
    
     # all trellises must be the same length/width
     noutputs = len(trellises[0].emit_p[:,0])
@@ -216,23 +220,26 @@ def viterbi_cuda(trellises):
     
     back_gpu = cuda.mem_alloc(back.nbytes)
     
-    streams = []
+#    streams = []
     
-    for i in range(len(trellises)):
-        s = cuda.Stream()
-        viterbi_cuda_gpu(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, nouts_gpu, numpy.int16(i), block=(nstates,1,1), stream=s)
-        streams.append(s)
+#    for i in range(len(trellises)):
+#        s = cuda.Stream()
+#        viterbi_cuda_gpu(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, nouts_gpu, numpy.int16(i), block=(nstates,1,1), stream=s)
+#        streams.append(s)
 
-#    viterbi_cuda_gpu(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, nouts_gpu, block=(nstates,1,1),grid=(ntrellises,1))
+    viterbi_cuda_gpu(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, nouts_gpu, block=(nstates,1,1),grid=(ntrellises,1))
+
+    route = numpy.zeros(obs_size, dtype=numpy.int16)
+    route_gpu = cuda.mem_alloc(route.nbytes)
+    cuda.memcpy_htod(route_gpu, route)
+
+    viterbi_backtrace_gpu(nobs_gpu, nstates_gpu, path_p_gpu, back_gpu, route_gpu, block=(ntrellises,1,1))     
     
-    cuda.memcpy_dtoh(path_p, path_p_gpu)
-    cuda.memcpy_dtoh(back, back_gpu)
+    cuda.memcpy_dtoh(route, route_gpu)
     
     for i in range(ntrellises):
         t = trellises[i]
-        t.path_p = path_p[i*nstates:(i+1)*nstates]
-        t.back = back[i*nstates*nobs:(i+1)*nstates*nobs]
-        t.routes.append(viterbi_cudabacktrace(nobs, t.path_p, t.back, nstates))
+        t.routes.append(numpy.transpose(route[i*nobs:(i+1)*nobs]))
 
 # parallelize me!
 def viterbi_cudabacktrace(nobs, path_p, back, nstates):
@@ -244,7 +251,7 @@ def viterbi_cudabacktrace(nobs, path_p, back, nstates):
     return route
 
 def viterbi_backtrace(nobs, path_p, back):
-    route = numpy.zeros((nobs,1),dtype=numpy.int16)
+    route = numpy.zeros(nobs,dtype=numpy.int16)
     route[-1] = numpy.argmax(path_p[-1,:])
 
     for n in range(2,nobs+1):
@@ -258,9 +265,10 @@ mod = SourceModule("""
 #define MAX_STATES 64 
 #define MAX_OUTS 64
 
-__global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *path_p, short *back, short nstates, short nobs, short nouts, short bx)
+__global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *path_p, short *back, short nstates, short nobs, short nouts) // short bx
 {
     const int tx = threadIdx.x;
+    const int bx = blockIdx.x;
     short i, j, ipmax;
     
     __shared__ float emit_p_s[MAX_OUTS * MAX_STATES];
@@ -307,6 +315,28 @@ __global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *p
     
     path_p[tx + bx*nstates] = path_p_s_n[tx];
     
+}
+
+__global__ void viterbi_cudabacktrace(short nobs, short nstates, float *path_p, short *back, short *route)
+{
+    const int tx = threadIdx.x;
+    int i;
+
+    float max_p = path_p[tx*nstates];
+    short imax_p = 0;
+    
+    for(i=1; i<nstates; i++) {
+        if(path_p[tx*nstates+i] > max_p) {
+            max_p = path_p[tx*nstates+i];
+            imax_p = i;
+        }
+    }
+
+    route[tx*nobs + nobs-1] = imax_p; 
+    
+    for(i=nobs-2; i > -1; i--) {
+        route[tx*nobs+i] = back[tx*nstates*nobs+(i+1)*nstates+route[tx*nobs + i+1]];
+    }
 }
 """)
 

@@ -5,7 +5,7 @@
 # viterbi algorithm, in pycuda and python (pp parallelized for clusters or SMP)
 
 # for 1024 observations and 64 states, pyterbi has roughly linear speedup with SMP cores
-# roughly 100x speedup on a NVS4200M graphics card compared to single core host
+# roughly 100x speedup on a NVS4200M graphics card compared to a single core of an i5-2520M
 
 # requires cuda compute capability 2.0 or higher
 # tested on python 2.7.1, pp 1.6.1, pycuda 2011.1.3
@@ -28,14 +28,14 @@ import pp
 import matplotlib.pyplot as plt
 
 def main():
-#    trellises = 1 
-#    cores = 0
-#    times = speedup_calc(16,4,4,trellises,cores, True)
+#    trellises = 8 
+#    cores = 2
+#    times = speedup_calc(512,32,64,trellises,cores, False)
 #    print 'speedup due to parallelism:', times
     benchmark_graphgen()
 
 def benchmark_graphgen():
-    trellises = 16 
+    trellises = 32 
     maxcores = 4
     nobs = [pow(2,i) for i in range(5,12)]
     noutputs = 32 
@@ -112,9 +112,8 @@ def run_hostviterbi(trellises, hostcores, networked=False):
     if not networked:
         job_server = pp.Server(ncpus=hostcores)
     else:
-        ppservers=("*",) 
+        ppservers=("*",)
         job_server = pp.Server(ppservers=ppservers, secret="pyterbi", ncpus=hostcores)
-        print 'connected to:', job_server.get_active_nodes() 
     jobs = []
     
     for t in trellises:
@@ -240,7 +239,7 @@ def viterbi_cuda(trellises):
     
     back_gpu = cuda.mem_alloc(back.nbytes)
     
-    viterbi_cuda_gpu(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, nouts_gpu, block=(nstates,1,1),grid=(ntrellises,1))
+    viterbi_cuda_gpu(obs_gpu, trans_p_gpu, emit_p_gpu, path_p_gpu, back_gpu, nstates_gpu, nobs_gpu, nouts_gpu, block=(nstates,1,1), grid=(ntrellises,1))
 
     route = numpy.zeros(obs_size, dtype=numpy.int16)
     route_gpu = cuda.mem_alloc(route.nbytes)
@@ -261,7 +260,7 @@ mod = SourceModule("""
 #define MAX_STATES 64 
 #define MAX_OUTS 32 
 
-__global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *path_p, short *back, short nstates, short nobs, short nouts) // short bx
+__global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *path_p, short *back, short nstates, short nobs, short nouts)
 {
     const int tx = threadIdx.x;
     const int bx = blockIdx.x;
@@ -271,7 +270,6 @@ __global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *p
     __shared__ float trans_p_s[MAX_STATES * MAX_STATES];
     __shared__ float path_p_s[MAX_STATES];
     __shared__ float path_p_s_n[MAX_STATES];
-    //__shared__ float back_s[MAX_STATES * MAX_OBS];
 
     for(i = 0; i < nouts; i++) {
         emit_p_s[tx + i*nstates] = emit_p[tx + i*nstates + bx * nouts * nstates];
@@ -301,13 +299,8 @@ __global__ void viterbi_cuda(short *obs, float *trans_p, float *emit_p, float *p
     
         path_p_s_n[tx] = pmax;
         back[j*nstates+tx+bx*nstates*nobs] = ipmax;
-        //back_s[j*nstates+tx] = ipmax;
         __syncthreads();
     }
-    
-    //for(j=0; j<nobs; j++) {
-    //    back[j*nstates+tx+bx*nstates*nobs] = back_s[j*nstates+tx];
-    //}
     
     path_p[tx + bx*nstates] = path_p_s_n[tx];
     

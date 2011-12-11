@@ -33,7 +33,7 @@
 
 \begin{abstract}
 %\boldmath
-Pyterbi is an open source Viterbi decoder parallelized either with CUDA or SMP. It is written in Python and uses the PyCUDA and PP modules. The PyCUDA parallelized Viterbi decoder is approximately 100 times faster than the host only unparallelized reference implementation. Each probable path at each state is computed in parallel, and the backtraces of multiple trellises is computed in parallel. The PP parallelized path can process multiple Viterbi trellises simultaneously and can dispatch them across multiple cores or computers.  
+Pyterbi is an open source Viterbi decoder parallelized either with CUDA or SMP. It is written in Python and uses the PyCUDA and PP modules. The PyCUDA parallelized Viterbi decoder is approximately 100 times faster than the single core unparallelized reference implementation. Each probable path at each state is computed in parallel, and the backtraces of multiple trellises is computed in parallel. The PP parallelized path can process multiple Viterbi trellises simultaneously and can dispatch them across multiple cores or computers.  
 
 \hfill \today 
 \end{abstract}
@@ -42,7 +42,7 @@ Pyterbi is an open source Viterbi decoder parallelized either with CUDA or SMP. 
 Pyterbi is an open source parallelized Viterbi decoder. It is capable of finding the most likely sequence of states through an arbitrary number of probabilistic finite state machine given noisy output observations. The PyCUDA parallelized path computes extracts parallelism by computing the most likely previous state for each possible state every time step in parallel. The PP parallelized path dispatches trellises to multiple CPU cores or servers over a network.
 
 
-Viterbi decoders have applications to pattern recognition and communication systems, including speech recognition, convolution code decoding, and continuous phase modulation decoding. A parallelized Viterbi decoder could be useful for wireless base stations communicating with many devices using convolutional coding or continuous phase modulation or a call center performing voice recognition on several incoming calls. More realistically, pyterbi provides an open source example of PyCUDA, PP, and generating graphs using matplotlib.   
+Viterbi decoders have applications to pattern recognition and communication systems, including speech recognition, convolution code decoding, and continuous phase modulation decoding [1] [2]. A parallelized Viterbi decoder could be useful for wireless base stations communicating with many devices using convolutional coding or continuous phase modulation or a call center performing voice recognition on several incoming calls. More realistically, pyterbi provides an open source example of PyCUDA, PP, and generating graphs using matplotlib.   
 
 
 The Viterbi algorithm maintains the most likely sequence of states leading to state. This is repeated for each observation. See Figure 2 for the reference Python implementation of the forward pass of the Viterbi algorithm.
@@ -83,7 +83,7 @@ for n in range(2,nobs+1):
 Pyterbi was tested on a Lenovo T420-41786VU laptop. This platform has a few limitations which add uncertainty to the benchmarks. 
 
 \subsection{Host Processor}
-The Intel i5-2520M processor supports Intel Turbo Boost, which dynamically scales core frequencies to maintain temperature limits [4]. This means that an application running entirely on one core could see higher clock frequencies than an application which keeps two cores active with scaled back clock frequencies. Additionally, the T420 laptop can't sustain full processor usage on both cores for an extended period of time. The laptop provided warning messages to a terminal stating that processor speed was being scaled back to avoid overheating while running an extended PP benchmark. These factors will increase the relative performance of shorter single core tasks.  
+The Intel i5-2520M processor supports Intel Turbo Boost, which dynamically scales core frequencies to maintain temperature limits [4]. This means that an application running on one core could see higher clock frequencies than an application which keeps two cores active. Additionally, the T420 laptop can't sustain full processor usage on both cores for an extended period of time. The laptop provided warning messages to a terminal stating that processor speed was being scaled back to avoid overheating while running an extended PP benchmark. These factors will increase the relative performance of shorter single core tasks.  
 
     \begin{figure}[!h]
             \begin{tabular}{ | l | l |}
@@ -97,7 +97,7 @@ The Intel i5-2520M processor supports Intel Turbo Boost, which dynamically scale
     \end{figure}
     
 \subsection{Graphics Card}
-    PyCUDA was written and tested on a NVIDIA NVS4200M graphics card. This is a low-end laptop graphics card with only a 64-bit memory bus and 48 cores. Performance would probably increase on a higher performance desktop graphics card. 
+    PyCUDA was written and tested on a NVIDIA NVS4200M graphics card. This is a low-end laptop graphics card with only a 64-bit memory bus and 48 cores. Performance of pyterbi would probably increase on a higher performance desktop graphics card. 
      \begin{figure}[!h]
             \begin{tabular}{ | l | l |}
                 \hline
@@ -115,7 +115,7 @@ The Intel i5-2520M processor supports Intel Turbo Boost, which dynamically scale
     \end{figure}
 
 \section{Parallelization}
-        The PyCUDA path of pyterbi was parallelized by computing the most likely previous state for each state in parallel for an observation. This would be parallelizing the for loop on line 5 on Figure 1. These can be computed in parallel, because each state only depends on information from previous observations. See Figure~\ref{fig:cpm} for an illustration of this. In this this figure, each thread is represented by a color, and lines represent accessing checking the probability of prior states. The treads were synchronized at every observation after computing the most likely previous state. Each trellis is mapped to a block of threads, which can share a grid with other trellises. 
+        The PyCUDA path of pyterbi was parallelized by computing the most likely previous state for each state in parallel for an observation. This is equivalent to parallelizing the for loop on line 5 of Figure 1. These can be computed in parallel, because each state only depends on information from previous observations. See Figure~\ref{fig:cpm} for an illustration of this. In this this figure, each thread is represented by a color, and lines represent accessing the probability of prior states. The treads are synchronized at every observation after computing the most likely previous state. Each trellis is mapped to a block of threads, which can share a grid with other trellises. 
 
         \begin{figure}
             \includegraphics[width=.8\textwidth]{figures/cpmfulltrelliscolored.png}
@@ -123,18 +123,18 @@ The Intel i5-2520M processor supports Intel Turbo Boost, which dynamically scale
             \label{fig:cpm}
         \end{figure}
 
-The PP path was parallelized by creating dispatching processes to compute each Trellises. This is coarser parallelism than the PyCUDA path. Finer grained parallelism was not reasonably possible using the standard Python interpreter because of the global interpreter lock, which prevents concurrent execution of multiple threads. Processes are more expensive to create than threads and cannot share memory as easily, so instead of creating threads for each state in a trellis, the PP path of pyterbi creates a process for each Trellis.    
+The PP path is parallelized by dispatching processes to compute each trellis. This is coarser parallelism than the PyCUDA path. Finer grained parallelism was not easily possible using the standard Python interpreter because of the global interpreter lock, which prevents concurrent execution of multiple threads. Processes are more expensive to create than threads and cannot share memory as easily, so instead of creating threads for each state in a trellis, the PP path of pyterbi creates a process for each trellis.    
 
 \section{Software Design and Data Location}
 The first version of the PyCUDA path of pyterbi was 15 times faster than the reference path. Many optimizations and tweaks later, this was improved to a 100 times speedup. 
         
-The first optimization of Pyterbi was moving the emission probability, observation, and transmission probability matrices from global to constant memory. This slowed down execution time by 50\%. This is possibly due to stuffing too much information into the constant cache and ignoring the L1/L2 cache present for global memory on compute capability 2.1 cards. Moving only the observation sequence to constant memory increased execution by 5\%. Eventually, the observation sequence and all other constant information was cached in shared memory instead of constant memory to support an arbitrary number of trellises.
+The first optimization of pyterbi was moving the emission probability, observation, and transmission probability matrices from global to constant memory. This slowed down execution time by 50\%. This is possibly due to stuffing too much information into the constant cache and ignoring the L1/L2 cache present for global memory on compute capability 2.1 cards. Moving only the observation sequence to constant memory increased execution by 5\%. Eventually, the observation sequence and all other constant information was cached in shared memory instead of constant memory to support an arbitrary number of trellises.
 
-The next optimization to Pyterbi was caching the emission probability, observation, and transmission matrices in shared memory. These matrices are filled from global memory at the start of the kernel in parallel, with a coalesced memory access pattern. Caching the constant matrices in shared memory at the start of each kernel reduced execution time by another 5\%. In addition to caching constant information in shared memory, the probability matrix and backtrace table are stored in shared memory.
+The next optimization to Pyterbi was caching the emission probability, observation, and transmission matrices in shared memory. These matrices are filled from global memory at the start of the kernel in parallel, with a coalesced memory access pattern. Caching the constant matrices in shared memory at the start of each kernel reduced execution time by another 5\%. In addition to caching constant information in shared memory, the slices of the probability matrix representing the current and previous state probabilities are stored in shared memory.
 
-The largest speed up on the PyCUDA path of pyterbi came from reducing communication between the host and device. The initial version of pyterbi called a kernel for each observation, implicitly synchronizing. Moving the observation loop to the kernel and explicitly synchronizing threads in a kernel reduced the number of kernel calls to once per trellis, which led to a 120\% speedup.
+The largest speed up for the PyCUDA path of pyterbi came from reducing communication between the host and graphics card. The initial version of pyterbi called a kernel for each observation, implicitly synchronizing. Moving the observation loop to the kernel and explicitly synchronizing threads in a kernel reduced the number of kernel calls from the number of observations to once per trellis, which led to over a 100\% speedup.
 
-The final optimization to pyterbi was moving the backtrace computation from the host to the device. This means the backtrace of multiple trellises can be computed in parallel, and only the route information needs to be copied back to the host for each trellis, instead of copying back the final path probabilities and the entire backtrace matrix, which is much larger. Optimizing the backtrace led to a 40\% speedup.
+The final optimization to pyterbi was moving the backtrace computation from the host to the device. This meant the backtrace of multiple trellises could be computed in parallel, and only the route information needs to be copied back to the host for each trellis, instead of copying back the final path probabilities and the entire backtrace matrix, which is much larger. Optimizing the backtrace led to a 40\% speedup.
 
 \section{Results}
 The SMP PP path of pyterbi approaches a two times speedup on a dual core hardware platform as the complexity of a trellis increases. See Figure \ref{fig_rhost} for a plot of the speedup of the PP path across observation sequence lengths and number of states. The speedup may be approaching two for more complicated inputs because the constant time associated with creating and dispatching jobs becomes dwarfed by time spent processing the trellises. The speedup will probably approach four on a four core processor given a sufficiently large number of complex trellises.
@@ -146,7 +146,7 @@ The SMP PP path of pyterbi approaches a two times speedup on a dual core hardwar
     \label{fig_rhost}
 \end{figure*}
 
-In addition parallelize for multiple core processors, PP also allows parallelization on clusters of computers. As a proof of concept, I tested pyterbi in a cluster consisting of a T420 laptop connected to a low-end VPS sharing a single AMD Opteron core with an unknown number of other virtual machines through a tethered internet connection from a cell phone. Clustering a single core of the T420 with the server led to a 10\% speedup. The speedup would probably be improved by using a cluster of faster computers connected with a more suitable network connection.
+In addition parallelizing for multiple core processors, PP also allows parallelization on clusters of computers. As a proof of concept, I tested pyterbi in a cluster consisting of a T420 laptop connected to a low-end VPS sharing a single AMD Opteron core with an unknown number of other virtual machines through a tethered internet connection from a cell phone. Clustering a single core of the T420 with the server led to a 10\% speedup. The speedup would probably be improved by using a cluster of faster computers connected with a more suitable network connection.
 
 The PyCUDA path of pyterbi provides over 100 times speedup compared the reference implementation for sufficiently complex trellises. See Figure \ref{fig_rcuda} for a graph of PyCUDA speedup as the observation length and number of states increases. The speedup generally increases as the observation length increases, and as the number of states in the trellis increases. This is probably because the increased complexity with an increase in states is $O(N)$ for the PyCUDA path, and $O(N^2)$ for the reference path. The speedup also increases as the observation length increases. This is probably because the relatively constant setup time of creating and initializing the kernel is overtaken by the time spend traversing the trellis.
 
@@ -159,19 +159,19 @@ The PyCUDA path of pyterbi provides over 100 times speedup compared the referenc
 
 
 \section{Conclusion}
-Pyterbi achieves a reasonable speedup over a non-parallelized reference implementation.
-
-Several further optimizations to pyterbi are possible:
+Pyterbi achieves a noticeable speedup over a non-parallelized reference implementation. It provided an opportunity to learn about CUDA and the PyCUDA and PP libraries. 
+Several improvements to pyterbi are possible:
 \begin{itemize}
-    \item rewriting the host code in a faster language (c)
-    \item rewriting host code for finer-grained parallelism with threads
-    \item testing kernel concurrency on more powerful graphics cards
-    \item testing realistic cases of cluster computing
-    \item getting PyCUDA working with PP for CUDA accelerated cluster computing 
+    \item Rewriting the host code in a faster language (C)
+    \item Rewriting host code for finer-grained parallelism with threads
+    \item Testing kernel concurrency on more powerful graphics cards
+    \item Testing realistic cases of cluster computing
+    \item Getting PyCUDA working with PP for CUDA accelerated cluster computing 
 \end{itemize}
 
+PyCUDA made accessing the CUDA API more pleasant than using CUDA from C. Abstracting away the cleanup of objects, error checking, and some of the syntax for memory transfers was helpful. While it doesn't save the programmer from understanding what is happening (and the kernel must still be written in C), it makes programming and debugging faster and easier. Learning CUDA through PyCUDA is a little more gentle. Likewise, the PP module was impressive. Easy to use parallelism libraries for higher level languages make parallel programming very accessible, and reduce the cost of parallelizing suitable applications.
 
-All the source code from this project, including this paper, is available at \url{http://github.com/loxodes/pyterbi}
+All the source code from this project, including this paper, are available under an MIT license at \url{http://github.com/loxodes/pyterbi}
 
 \section*{References}
         [1] Lou, H.-L.; , ``Implementing the Viterbi algorithm,'' Signal Processing Magazine, IEEE , vol.12, no.5, pp.42-52, Sep 1995 \\
@@ -185,6 +185,5 @@ All the source code from this project, including this paper, is available at \ur
         [5] Vanovschi V., ``Parallel Python Software,'', 2011, \url{http://www.parallelpython.com}\\
 
         [6] Andreas Kloeckner, ``PyCUDA,'', 2011, \url{http://mathema.tician.de/software/pycuda}\\
-
 
 \end{document}

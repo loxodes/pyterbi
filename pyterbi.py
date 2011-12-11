@@ -1,6 +1,7 @@
 # jon klein
 # kleinjt@ieee.org
 # mit license 
+# 2011
 
 # viterbi algorithm, in pycuda and python (pp parallelized for clusters or SMP)
 
@@ -8,7 +9,7 @@
 # roughly 100x speedup on a NVS4200M graphics card compared to a single core of an i5-2520M
 
 # requires cuda compute capability 2.0 or higher
-# tested on python 2.7.1, pp 1.6.1, pycuda 2011.1.3
+# tested on python 2.7.1, pp 1.6.1, pycuda 2011.1.3,
 
 # obs       - observations                      [sample]
 # states    - states                            [state] 
@@ -23,16 +24,15 @@ import pycuda.autoinit
 import pycuda.driver as cuda
 from pycuda.compiler import SourceModule
 import numpy
-import sys
 import pp
 import matplotlib.pyplot as plt
 
 def main():
-#    trellises = 8 
-#    cores = 2
-#    times = speedup_calc(512,32,64,trellises,cores, False)
-#    print 'speedup due to parallelism:', times
-    benchmark_graphgen()
+    trellises = 8 
+    cores = 2
+    times = speedup_calc(512,32,64,trellises,cores, False)
+    print 'speedup due to parallelism:', times
+#    benchmark_graphgen()
 
 def benchmark_graphgen():
     trellises = 32 
@@ -65,7 +65,7 @@ def benchmark_graphgen():
     plt.grid(True)
     plt.savefig('speedup_graph_host.png')
 
-def benchmark_host(trellises, cores, networked=False):
+def benchmark_host(trellises, cores, networked = False):
     start = cuda.Event()
     end = cuda.Event()
 
@@ -243,7 +243,6 @@ def viterbi_cuda(trellises):
 
     route = numpy.zeros(obs_size, dtype=numpy.int16)
     route_gpu = cuda.mem_alloc(route.nbytes)
-    cuda.memcpy_htod(route_gpu, route)
 
     viterbi_backtrace_gpu(nobs_gpu, nstates_gpu, path_p_gpu, back_gpu, route_gpu, block=(ntrellises,1,1))     
     

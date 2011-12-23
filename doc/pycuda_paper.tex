@@ -39,7 +39,7 @@ Pyterbi is an open source Viterbi decoder parallelized either with CUDA or SMP. 
 \end{abstract}
 
 \section{Introduction}
-Pyterbi is an open source parallelized Viterbi decoder. It is capable of finding the most likely sequence of states through an arbitrary number of probabilistic finite state machine given noisy output observations. The PyCUDA parallelized path computes extracts parallelism by computing the most likely previous state for each possible state every time step in parallel. The PP parallelized path dispatches trellises to multiple CPU cores or servers over a network.
+Pyterbi is an open source parallelized Viterbi decoder. It is capable of finding the most likely sequence of states through an arbitrary number of probabilistic finite state machines given noisy output observations. The PyCUDA parallelized path extracts parallelism by computing the most likely previous state for each possible state every time step in parallel. The PP parallelized path dispatches trellises to multiple CPU cores, or servers over a network.
 
 
 Viterbi decoders have applications to pattern recognition and communication systems, including speech recognition, convolution code decoding, and continuous phase modulation decoding [1] [2]. A parallelized Viterbi decoder could be useful for wireless base stations communicating with many devices using convolutional coding or continuous phase modulation or a call center performing voice recognition on several incoming calls. More realistically, pyterbi provides an open source example of PyCUDA, PP, and generating graphs using matplotlib.   
